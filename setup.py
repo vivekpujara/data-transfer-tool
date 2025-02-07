@@ -1,10 +1,14 @@
 from setuptools import setup, find_packages
 
+# Read the README file for the long description with explicit encoding.
+with open("README.md", "r", encoding="utf-8") as f:
+    long_description = f.read()
+
 setup(
     name="data-transfer-tool",
     version="0.1.0",
     description="Tool to transfer data between HPC clusters using AWS S3",
-    long_description=open("README.md").read(),
+    long_description=long_description,
     long_description_content_type="text/markdown",
     author="Vivek Pujara",
     author_email="vivekpujara.vp@gmail.com",

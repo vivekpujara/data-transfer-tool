@@ -1,6 +1,7 @@
 import os
 import sys
 import boto3
+import tarfile
 from tqdm import tqdm
 import argparse
 from botocore.exceptions import ClientError
@@ -114,9 +115,61 @@ def download_from_s3(bucket_name, s3_object_path, destination_path, extract=Fals
         print(f"Deleted tarball from S3: {bucket_name}:{s3_object_path}")
 
 def create_tarball(source_folder, tarball_path):
-    """Create a tarball of the source folder."""
-    os.system(f"tar -czvf {tarball_path} -C {os.path.dirname(source_folder)} {os.path.basename(source_folder)}")
-    print(f"Tarball created at: {tarball_path}")
+    """Create a tarball of the source folder with resumable capability, using tqdm for progress."""
+
+    # Generate progress file name
+    progress_file = f"{os.path.splitext(os.path.basename(tarball_path))[0]}.filelist.txt"
+
+    # Track processed files and sizes
+    processed_files = set()
+    total_size = 0
+    processed_size = 0
+
+    # Load progress if exists
+    if os.path.exists(progress_file):
+        with open(progress_file, 'r') as f:
+            lines = f.readlines()
+            if lines:
+                processed_files = set(lines[0].strip().split(",")) if lines[0].strip() else set()
+                processed_size = int(lines[1].strip()) if len(lines) > 1 else 0
+
+    # Calculate total size
+    file_list = []
+    for root, _, files in os.walk(source_folder):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if file_path not in processed_files:  # Exclude already processed files
+                file_list.append(file_path)
+                total_size += os.path.getsize(file_path)
+
+    # Initialize tqdm progress bar
+    progress_bar = tqdm(total=total_size, initial=processed_size, unit="B", unit_scale=True, desc="Tarballing")
+
+    # Open tarball for writing
+    with tarfile.open(tarball_path, 'w:gz') as tar:
+        for file_path in file_list:
+            try:
+                tar.add(file_path, arcname=os.path.relpath(file_path, source_folder))
+                file_size = os.path.getsize(file_path)
+                processed_files.add(file_path)
+                processed_size += file_size
+
+                # Save progress
+                with open(progress_file, 'w') as f:
+                    f.write(",".join(processed_files) + "\n")
+                    f.write(str(processed_size) + "\n")
+
+                # Update progress bar
+                progress_bar.update(file_size)
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+
+    # Close tqdm bar
+    progress_bar.close()
+
+    # Completion message
+    print(f"\nTarball created successfully: {tarball_path}")
+    print(f"Progress saved to: {progress_file} (retained after completion)")
 
 def main():
     """Main CLI workflow."""

@@ -43,3 +43,9 @@ coverage.xml
 
 # Windows
 Thumbs.db
+
+# Generated progress files from create_tarball
+*.filelist.txt
+
+# Generated tarball files (if created in the repo)
+*.tar.gz
