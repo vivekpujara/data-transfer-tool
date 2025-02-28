@@ -116,9 +116,10 @@ def download_from_s3(bucket_name, s3_object_path, destination_path, extract=Fals
 
 def create_tarball(source_folder, tarball_path):
     """Create a tarball of the source folder with resumable capability, using tqdm for progress."""
-
-    # Generate progress file name
-    progress_file = f"{os.path.splitext(os.path.basename(tarball_path))[0]}.filelist.txt"
+    # Generate progress file name in the same temp directory as the tarball,
+    # ensuring it includes the basename of the folder being uploaded.
+    progress_file = os.path.join(os.path.dirname(tarball_path),
+                                 f"{os.path.splitext(os.path.basename(tarball_path))[0]}.filelist.txt")
 
     # Track processed files and sizes
     processed_files = set()
