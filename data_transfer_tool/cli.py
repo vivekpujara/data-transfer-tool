@@ -1,10 +1,10 @@
 import os
 import sys
 import boto3
-import tarfile
-from tqdm import tqdm
 import argparse
+from tqdm import tqdm
 from botocore.exceptions import ClientError
+import subprocess
 
 def check_conda_environment():
     """Ensure a Conda environment is active."""
@@ -115,62 +115,110 @@ def download_from_s3(bucket_name, s3_object_path, destination_path, extract=Fals
         print(f"Deleted tarball from S3: {bucket_name}:{s3_object_path}")
 
 def create_tarball(source_folder, tarball_path):
-    """Create a tarball of the source folder with resumable capability, using tqdm for progress."""
-    # Generate progress file name in the same temp directory as the tarball,
-    # ensuring it includes the basename of the folder being uploaded.
+    """Create a tarball of the source folder with resumable capability using the tar -czvf CLI command.
+    
+    This function uses the system's tar command to create a compressed tarball.
+    If a tarball already exists, it lists the archived files (using tar -tzf) and computes
+    the missing files, then creates a temporary tarball of those files and concatenates it
+    to the existing tarball (tar concatenation of gzip files is supported by GNU tar).
+    
+    A tqdm progress bar is used to display progress for the tarballing process.
+    The progress file is created in the same temp directory as the tarball,
+    and its name includes the basename of the folder being uploaded.
+    """
+    # Resolve absolute paths and determine names
+    source_folder = os.path.abspath(source_folder)
+    source_basename = os.path.basename(source_folder.rstrip("/"))
+    source_parent = os.path.dirname(source_folder.rstrip("/"))
     progress_file = os.path.join(os.path.dirname(tarball_path),
-                                 f"{os.path.splitext(os.path.basename(tarball_path))[0]}.filelist.txt")
-
-    # Track processed files and sizes
-    processed_files = set()
-    total_size = 0
-    processed_size = 0
-
-    # Load progress if exists
-    if os.path.exists(progress_file):
-        with open(progress_file, 'r') as f:
-            lines = f.readlines()
-            if lines:
-                processed_files = set(lines[0].strip().split(",")) if lines[0].strip() else set()
-                processed_size = int(lines[1].strip()) if len(lines) > 1 else 0
-
-    # Calculate total size
-    file_list = []
-    for root, _, files in os.walk(source_folder):
-        for file in files:
-            file_path = os.path.join(root, file)
-            if file_path not in processed_files:  # Exclude already processed files
-                file_list.append(file_path)
-                total_size += os.path.getsize(file_path)
-
-    # Initialize tqdm progress bar
-    progress_bar = tqdm(total=total_size, initial=processed_size, unit="B", unit_scale=True, desc="Tarballing")
-
-    # Open tarball for writing
-    with tarfile.open(tarball_path, 'w:gz') as tar:
-        for file_path in file_list:
-            try:
-                tar.add(file_path, arcname=os.path.relpath(file_path, source_folder))
-                file_size = os.path.getsize(file_path)
-                processed_files.add(file_path)
-                processed_size += file_size
-
-                # Save progress
-                with open(progress_file, 'w') as f:
-                    f.write(",".join(processed_files) + "\n")
-                    f.write(str(processed_size) + "\n")
-
-                # Update progress bar
-                progress_bar.update(file_size)
-            except Exception as e:
-                print(f"Error processing {file_path}: {e}")
-
-    # Close tqdm bar
-    progress_bar.close()
-
-    # Completion message
-    print(f"\nTarball created successfully: {tarball_path}")
-    print(f"Progress saved to: {progress_file} (retained after completion)")
+                                 f"{source_basename}.filelist.txt")
+    
+    if not os.path.exists(tarball_path):
+        # Create tarball from scratch.
+        # Count total number of files in the source folder.
+        total_files = 0
+        for root, _, files in os.walk(source_folder):
+            total_files += len(files)
+        # Build the tar command.
+        command = f"tar -czvf {tarball_path} -C {source_parent} {source_basename}"
+        print(f"Running tar command: {command}")
+        pbar = tqdm(total=total_files, unit="files", desc="Tarballing")
+        archived_list = []
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        for line in process.stdout:
+            stripped = line.strip()
+            if stripped:
+                archived_list.append(stripped)
+                pbar.update(1)
+        process.wait()
+        pbar.close()
+        if process.returncode != 0:
+            print("Error: Tarball creation failed.")
+            sys.exit(1)
+        # Write progress file with the names of all archived files.
+        with open(progress_file, 'w') as f:
+            for archived in archived_list:
+                f.write(archived + "\n")
+            f.write("Complete\n")
+        print(f"\nTarball created successfully: {tarball_path}")
+        print(f"Progress saved to: {progress_file} (retained after completion)")
+    else:
+        # Tarball exists, so check for missing files using tar -tzf.
+        print("Existing tarball found. Checking for missing files to resume...")
+        # List files in existing tarball (paths are relative to source_parent)
+        cmd_list = f"tar -tzf {tarball_path}"
+        tar_list_output = os.popen(cmd_list).read().splitlines()
+        archived_files = set(tar_list_output)
+        
+        # Build set of all files in the source folder relative to source_parent.
+        all_files = set()
+        for root, _, files in os.walk(source_folder):
+            for file in files:
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, source_parent)
+                all_files.add(rel_path)
+                
+        missing_files = all_files - archived_files
+        if not missing_files:
+            print("All files have already been archived.")
+        else:
+            print(f"Resuming tarball creation. {len(missing_files)} files remaining.")
+            missing_files_list = list(missing_files)
+            missing_files_str = " ".join([f"'{f}'" for f in missing_files_list])
+            temp_tarball = tarball_path + ".temp"
+            command = f"tar -czvf {temp_tarball} -C {source_parent} {missing_files_str}"
+            print(f"Running tar command for missing files: {command}")
+            pbar = tqdm(total=len(missing_files_list), unit="files", desc="Resuming Tarballing")
+            temp_archived = []
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            for line in process.stdout:
+                stripped = line.strip()
+                if stripped:
+                    temp_archived.append(stripped)
+                    pbar.update(1)
+            process.wait()
+            pbar.close()
+            if process.returncode != 0:
+                print("Error: Tarball creation for missing files failed.")
+                sys.exit(1)
+            # Concatenate the existing tarball and the temporary tarball.
+            new_tarball = tarball_path + ".new"
+            cat_command = f"cat {tarball_path} {temp_tarball} > {new_tarball}"
+            print(f"Concatenating tarballs with command: {cat_command}")
+            ret = os.system(cat_command)
+            if ret != 0:
+                print("Error: Concatenating tarballs failed.")
+                sys.exit(1)
+            os.replace(new_tarball, tarball_path)
+            os.remove(temp_tarball)
+            print("Tarball resumed and updated successfully.")
+            # Update progress file with the union of archived files.
+            all_archived = archived_files.union(set(temp_archived))
+            with open(progress_file, 'w') as f:
+                for file in sorted(all_archived):
+                    f.write(file + "\n")
+                f.write("Resumed and complete\n")
+            print(f"Progress saved to: {progress_file} (retained after completion)")
 
 def main():
     """Main CLI workflow."""
